@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 )
@@ -133,7 +134,6 @@ func (s *Session) executeQuery(qry *Query) *Iter {
 		switch itr.errFrame.Code {
 		case errServer, errWriteTimeout, errReadTimeout, errOverloaded:
 			err = itr.errFrame
-			continue
 		default:
 			return itr
 		}
