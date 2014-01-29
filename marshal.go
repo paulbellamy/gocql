@@ -10,8 +10,6 @@ import (
 	"math"
 	"reflect"
 	"time"
-
-	"tux21b.org/v1/gocql/uuid"
 )
 
 // Marshaler is the interface implemented by objects that can marshal
@@ -84,8 +82,10 @@ func Unmarshal(info *TypeInfo, data []byte, value interface{}) error {
 		return unmarshalList(info, data, value)
 	case TypeMap:
 		return unmarshalMap(info, data, value)
-	case TypeTimeUUID, TypeUUID:
+	case TypeTimeUUID:
 		return unmarshalTimeUUID(info, data, value)
+	case TypeUUID:
+		return unmarshalUUID(info, data, value)
 	case TypeInet:
 		return unmarshalInet(info, data, value)
 	}
@@ -903,40 +903,70 @@ func unmarshalMap(info *TypeInfo, data []byte, value interface{}) error {
 }
 
 func marshalUUID(info *TypeInfo, value interface{}) ([]byte, error) {
-	if val, ok := value.([]byte); ok && len(val) == 16 {
-		return val, nil
-	}
-	if val, ok := value.(uuid.UUID); ok {
+	switch val := value.(type) {
+	case UUID:
 		return val.Bytes(), nil
+	case []byte:
+		if len(val) == 16 {
+			return val, nil
+		}
+	case string:
+		b, err := ParseUUID(val)
+		if err != nil {
+			return nil, err
+		}
+		return b[:], nil
 	}
 	return nil, marshalErrorf("can not marshal %T into %s", value, info)
+}
+
+func unmarshalUUID(info *TypeInfo, data []byte, value interface{}) error {
+	if data == nil {
+		switch v := value.(type) {
+		case *string:
+			*v = ""
+		case *[]byte:
+			*v = nil
+		case *UUID:
+			*v = UUID{}
+		default:
+			return unmarshalErrorf("can not unmarshal X %s into %T", info, value)
+		}
+	}
+	u, err := UUIDFromBytes(data)
+	if err != nil {
+		return unmarshalErrorf("Unable to parse UUID: %s", err)
+	}
+	switch v := value.(type) {
+	case *string:
+		*v = u.String()
+		return nil
+	case *[]byte:
+		*v = u[:]
+		return nil
+	case *UUID:
+		*v = u
+		return nil
+	}
+	return unmarshalErrorf("can not unmarshal X %s into %T", info, value)
 }
 
 func unmarshalTimeUUID(info *TypeInfo, data []byte, value interface{}) error {
 	switch v := value.(type) {
 	case Unmarshaler:
 		return v.UnmarshalCQL(info, data)
-	case *uuid.UUID:
-		*v = uuid.FromBytes(data)
-		return nil
 	case *time.Time:
-		if len(data) != 16 {
+		id, err := UUIDFromBytes(data)
+		if err != nil {
+			return err
+		} else if id.Version() != 1 {
 			return unmarshalErrorf("invalid timeuuid")
 		}
-		if version := int(data[6] & 0xF0 >> 4); version != 1 {
-			return unmarshalErrorf("invalid timeuuid")
-		}
-		timestamp := int64(uint64(data[0])<<24|uint64(data[1])<<16|
-			uint64(data[2])<<8|uint64(data[3])) +
-			int64(uint64(data[4])<<40|uint64(data[5])<<32) +
-			int64(uint64(data[6]&0x0F)<<56|uint64(data[7])<<48)
-		timestamp = timestamp - timeEpoch
-		sec := timestamp / 1e7
-		nsec := timestamp - sec
-		*v = time.Unix(int64(sec), int64(nsec)).UTC()
+		*v = id.Time()
 		return nil
+	default:
+		return unmarshalUUID(info, data, value)
 	}
-	return unmarshalErrorf("can not unmarshal %s into %T", info, value)
 }
 
 func unmarshalInet(info *TypeInfo, data []byte, value interface{}) error {
@@ -1067,5 +1097,3 @@ func (m UnmarshalError) Error() string {
 func unmarshalErrorf(format string, args ...interface{}) UnmarshalError {
 	return UnmarshalError(fmt.Sprintf(format, args...))
 }
-
-var timeEpoch int64 = 0x01B21DD213814000

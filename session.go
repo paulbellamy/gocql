@@ -8,17 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"sync"
 	"time"
-
-	"tux21b.org/v1/gocql/uuid"
 )
 
 // Session is the interface used by users to interact with the database.
 //
-// It extends the Node interface by adding a convinient query builder and
-// automatically sets a default consinstency level on all operations
+// It's safe for concurrent use by multiple goroutines and a typical usage
+// scenario is to have one global session object to interact with the
+// whole Cassandra cluster.
+//
+// This type extends the Node interface by adding a convinient query builder
+// and automatically sets a default consinstency level on all operations
 // that do not have a consistency level set.
 type Session struct {
 	Node     Node
@@ -136,10 +137,8 @@ func (s *Session) executeQuery(qry *Query) *Iter {
 		default:
 			return itr
 		}
-
 		qry.rtPolicy.Count++
 	}
-	log.Println("Default Return")
 	return &Iter{err: err}
 }
 
@@ -163,7 +162,7 @@ type Query struct {
 	session    *Session
 	lbPolicy   LoadBalancePolicy
 	rtPolicy   RetryPolicy
-	lastHostID uuid.UUID
+	lastHostID UUID
 	prefDC     string
 	prefRack   string
 }

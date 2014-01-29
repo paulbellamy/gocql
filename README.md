@@ -1,16 +1,13 @@
 gocql
 =====
 
+[![Build Status](https://travis-ci.org/tux21b/gocql.png?branch=master)](https://travis-ci.org/tux21b/gocql)
+[![GoDoc](http://godoc.org/tux21b.org/v1/gocql?status.png)](http://godoc.org/tux21b.org/v1/gocql)
+
 **Package Status:** Alpha 
 
 Package gocql implements a fast and robust Cassandra client for the
 Go programming language.
-
-
-**Attention:** This package is currently actively developed and the API may
-change in the future. The old "datbase/sql" based package is now called
-[gocqldriver](https://github.com/tux21b/gocqldriver) and is no longer
-maintained.
 
 Project Website: http://tux21b.org/gocql/<br>
 API documentation: http://godoc.org/tux21b.org/v1/gocql<br>
@@ -55,7 +52,6 @@ import (
 	"log"
 
 	"tux21b.org/v1/gocql"
-	"tux21b.org/v1/gocql/uuid"
 )
 
 func main() {
@@ -63,16 +59,16 @@ func main() {
 	cluster := gocql.NewCluster("192.168.1.1", "192.168.1.2", "192.168.1.3")
 	cluster.Keyspace = "example"
 	cluster.Consistency = gocql.Quorum
-	session := cluster.CreateSession()
+	session, _ := cluster.CreateSession()
 	defer session.Close()
 
 	// insert a tweet
 	if err := session.Query(`INSERT INTO tweet (timeline, id, text) VALUES (?, ?, ?)`,
-		"me", uuid.TimeUUID(), "hello world").Exec(); err != nil {
+		"me", gocql.TimeUUID(), "hello world").Exec(); err != nil {
 		log.Fatal(err)
 	}
 
-	var id uuid.UUID
+	var id gocql.UUID
 	var text string
 
 	// select a single tweet
@@ -93,9 +89,15 @@ func main() {
 }
 ```
 
+Other Projects
+--------------
+
+* [cqlc](http://relops.com/cqlc) generates gocql compliant code from your Cassandra schema so that you can write type safe CQL statements in Go with a natural query syntax.
+* [gocqldriver](https://github.com/tux21b/gocqldriver) is the predecessor of gocql based on Go's "database/sql" package. This project isn't maintained anymore, because Cassandra wasn't a good fit for the traditional "database/sql" API. Use this package instead.
+
 License
 -------
 
-> Copyright (c) 2012 The gocql Authors. All rights reserved.
+> Copyright (c) 2012-2014 The gocql Authors. All rights reserved.
 > Use of this source code is governed by a BSD-style
 > license that can be found in the LICENSE file.

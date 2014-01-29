@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"tux21b.org/v1/gocql/uuid"
 )
 
 type TestServer struct {
@@ -21,7 +19,7 @@ type TestServer struct {
 	t         *testing.T
 	nreq      int64
 	listen    net.Listener
-	hid       uuid.UUID
+	hid       UUID
 	dc        string
 	rack      string
 	bootstrap string
@@ -158,11 +156,15 @@ func NewTestServer(t *testing.T, dc string, rack string, bootstrapped bool) *Tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	ruuid, err := RandomUUID()
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := &TestServer{
 		Address:   listen.Addr().String(),
 		listen:    listen,
 		t:         t,
-		hid:       uuid.RandomUUID(),
+		hid:       ruuid,
 		dc:        dc,
 		rack:      rack,
 		bootstrap: strapped,

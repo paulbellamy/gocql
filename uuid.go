@@ -6,19 +6,22 @@
 // identifiers, a standardized format in the form of a 128 bit number.
 //
 // http://tools.ietf.org/html/rfc4122
-package uuid
+package gocql
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
 type UUID [16]byte
 
 var hardwareAddr []byte
+var clockSeq uint32
 
 const (
 	VariantNCSCompat = 0
@@ -47,6 +50,11 @@ func init() {
 		}
 		hardwareAddr[0] = hardwareAddr[0] | 0x01
 	}
+
+	// initialize the clock sequence with a random number
+	var clockSeqRand [2]byte
+	io.ReadFull(rand.Reader, clockSeqRand[:])
+	clockSeq = uint32(clockSeqRand[1])<<8 | uint32(clockSeqRand[0])
 }
 
 // ParseUUID parses a 32 digit hexadecimal number (that might contain hypens)
@@ -75,47 +83,55 @@ func ParseUUID(input string) (UUID, error) {
 	return u, nil
 }
 
-// FromBytes converts a raw byte slice to an UUID. It will panic if the slice
-// isn't exactly 16 bytes long.
-func FromBytes(input []byte) UUID {
+// UUIDFromBytes converts a raw byte slice to an UUID.
+func UUIDFromBytes(input []byte) (UUID, error) {
 	var u UUID
 	if len(input) != 16 {
-		panic("UUIDs must be exactly 16 bytes long")
+		return u, errors.New("UUIDs must be exactly 16 bytes long")
 	}
+
 	copy(u[:], input)
-	return u
+	return u, nil
 }
 
 // RandomUUID generates a totally random UUID (version 4) as described in
 // RFC 4122.
-func RandomUUID() UUID {
+func RandomUUID() (UUID, error) {
 	var u UUID
-	io.ReadFull(rand.Reader, u[:])
+	_, err := io.ReadFull(rand.Reader, u[:])
+	if err != nil {
+		return u, err
+	}
 	u[6] &= 0x0F // clear version
 	u[6] |= 0x40 // set version to 4 (random uuid)
 	u[8] &= 0x3F // clear variant
 	u[8] |= 0x80 // set to IETF variant
-	return u
+	return u, nil
 }
 
 var timeBase = time.Date(1582, time.October, 15, 0, 0, 0, 0, time.UTC).Unix()
 
-// TimeUUID generates a new time based UUID (version 1) as described in RFC
-// 4122. This UUID contains the MAC address of the node that generated the
-// UUID, a timestamp and a sequence number.
+// TimeUUID generates a new time based UUID (version 1) using the current
+// time as the timestamp.
 func TimeUUID() UUID {
+	return UUIDFromTime(time.Now())
+}
+
+// UUIDFromTime generates a new time based UUID (version 1) as described in
+// RFC 4122. This UUID contains the MAC address of the node that generated
+// the UUID, the given timestamp and a sequence number.
+func UUIDFromTime(aTime time.Time) UUID {
 	var u UUID
 
-	now := time.Now().In(time.UTC)
-	t := uint64(now.Unix()-timeBase)*10000000 + uint64(now.Nanosecond()/100)
+	utcTime := aTime.In(time.UTC)
+	t := uint64(utcTime.Unix()-timeBase)*10000000 + uint64(utcTime.Nanosecond()/100)
 	u[0], u[1], u[2], u[3] = byte(t>>24), byte(t>>16), byte(t>>8), byte(t)
 	u[4], u[5] = byte(t>>40), byte(t>>32)
 	u[6], u[7] = byte(t>>56)&0x0F, byte(t>>48)
 
-	var clockSeq [2]byte
-	io.ReadFull(rand.Reader, clockSeq[:])
-	u[8] = clockSeq[1]
-	u[9] = clockSeq[0]
+	clock := atomic.AddUint32(&clockSeq, 1)
+	u[8] = byte(clock >> 8)
+	u[9] = byte(clock)
 
 	copy(u[10:], hardwareAddr)
 
@@ -187,10 +203,8 @@ func (u UUID) Time() time.Time {
 	if u.Version() != 1 {
 		return time.Time{}
 	}
-	t := u.Timestamp() - timeEpoch
+	t := u.Timestamp()
 	sec := t / 1e7
-	nsec := t - sec
-	return time.Unix(int64(sec), int64(nsec)).UTC()
+	nsec := t % 1e7
+	return time.Unix(sec+timeBase, nsec).UTC()
 }
-
-var timeEpoch int64 = 0x01B21DD213814000

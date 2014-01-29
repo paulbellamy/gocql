@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"tux21b.org/v1/gocql/uuid"
 )
 
 // ClusterConfig is a struct to configure the default cluster implementation
@@ -188,7 +186,7 @@ func (c *clusterImpl) addConn(conn *Conn, keyspace string) error {
 		log.Printf("Iterator error: %v", iter.err)
 		return iter.err
 	}
-	var hostID uuid.UUID
+	var hostID UUID
 	var dc, rack, ready string
 	iter.Scan(&hostID, &dc, &rack, &ready)
 
@@ -200,7 +198,7 @@ func (c *clusterImpl) addConn(conn *Conn, keyspace string) error {
 			Rack:       rack,
 		}
 		conn.hostID = host.HostID
-		if pHost, ok := c.hostPool.pool[host.HostID]; ok {
+		if pHost, ok := c.hostPool.GetHost(host.HostID); ok {
 			pHost.conn = append(pHost.conn, conn)
 			host = pHost
 		} else {
@@ -247,12 +245,12 @@ func (c *clusterImpl) HandleKeyspace(conn *Conn, keyspace string) {
 
 //autoDiscover queries a host to pull cluster information and forms connections with available hosts
 func (c *clusterImpl) autoDiscover() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	//Exit if autodiscover is disabled or the cluster is quiting.
 	if c.cfg.AutoDiscoverInterval < 1 || c.quit {
 		return
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if time.Now().Add(-time.Second * time.Duration(c.cfg.AutoDiscoverInterval)).After(c.lastAutoDiscover) {
 		//Adjust last autodiscover time for after the execution
@@ -271,7 +269,7 @@ func (c *clusterImpl) autoDiscover() {
 			log.Printf("failed to collect peer information %v", itr.err)
 			return
 		}
-		var hid uuid.UUID
+		var hid UUID
 		var peerAddr, rpcAddr string
 		//Get a read lock on the host pool and create connections with hosts.
 		c.hostPool.mu.RLock()
