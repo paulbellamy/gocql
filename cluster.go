@@ -221,10 +221,11 @@ func (c *clusterImpl) HandleError(conn *Conn, err error, closed bool) {
 		return
 	}
 	c.hostPool.RemoveConn(conn)
-	/*if !c.quit {
-		go c.connect(conn.Address()) // reconnect
-	}*/
-	//reconnects will happen due to autodiscovery. This way the nodes can be validated against the cluster.
+	//Attempt to instantly reconnect. This should maintain valid connections in small pools with low connections.
+	//Keep in same goroutine so there is a connection available for a retry.
+	if !c.quit {
+		c.connect(conn.Address())
+	}
 }
 
 //HandleKeyspace is this still valid?
@@ -298,7 +299,7 @@ func (c *clusterImpl) autoDiscover() {
 	}
 }
 
-func (c *clusterImpl) Pick(qry *Query) *Conn {
+func (c *clusterImpl) Pick(qry *QueryMeta) *Conn {
 	return c.hostPool.Pick(qry)
 }
 

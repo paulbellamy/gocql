@@ -122,22 +122,36 @@ func (c *Conn) startup(cfg *ConnConfig) error {
 // to execute any queries. This method runs as long as the connection is
 // open and is therefore usually called in a separate goroutine.
 func (c *Conn) serve() {
+	var errFrm errorFrame
 	for {
 		resp, err := c.recv()
 		if err != nil {
+			//Setup the error frame so a proper query retry can happen.
+			if nerr, ok := err.(net.Error); ok {
+				if nerr.Timeout() {
+					errFrm = errorFrame{Code: errServer, Message: ErrConnTimeout.Error()}
+				} else {
+					errFrm = errorFrame{Code: errProtocol, Message: ErrProtocol.Error()}
+				}
+
+			} else {
+				errFrm = errorFrame{Code: errProtocol, Message: ErrProtocol.Error()}
+			}
 			break
 		}
 		c.dispatch(resp)
 	}
-
 	c.conn.Close()
+	//Handle the error so a new connection is opened before handling the error responses.
+	//This way a connection should be available for a retry.
+	c.cluster.HandleError(c, errFrm, true)
+	//Complete the outstanding responses
 	for id := 0; id < len(c.calls); id++ {
 		req := &c.calls[id]
 		if atomic.LoadInt32(&req.active) == 1 {
-			req.resp <- callResp{nil, ErrProtocol}
+			req.resp <- callResp{nil, errFrm}
 		}
 	}
-	c.cluster.HandleError(c, ErrProtocol, true)
 }
 
 func (c *Conn) recv() (frame, error) {
@@ -216,6 +230,7 @@ func (c *Conn) exec(op operation, trace Tracer) (interface{}, error) {
 	atomic.StoreInt32(&call.active, 1)
 
 	if n, err := c.conn.Write(req); err != nil {
+		//This may cause premature wiping of the connection pool in an unstable network situation.
 		c.conn.Close()
 		if n > 0 {
 			return nil, ErrProtocol

@@ -79,9 +79,10 @@ func (s *Session) SetTrace(trace Tracer) {
 // value before the query is executed.
 func (s *Session) Query(stmt string, values ...interface{}) *Query {
 	s.mu.RLock()
-	rt := RetryPolicy{}
-	rt.DataCenter = s.cfg.DefaultRetryPolicy.DataCenter
-	rt.Rack = s.cfg.DefaultRetryPolicy.Rack
+	rt := RetryPolicy{
+		DataCenter: s.cfg.DefaultRetryPolicy.DataCenter,
+		Rack:       s.cfg.DefaultRetryPolicy.Rack,
+	}
 
 	qry := &Query{stmt: stmt,
 		values:   values,
@@ -90,10 +91,12 @@ func (s *Session) Query(stmt string, values ...interface{}) *Query {
 		pageSize: s.pageSize,
 		trace:    s.trace,
 		prefetch: s.prefetch,
-		lbPolicy: s.cfg.DefaultLBPolicy,
-		rtPolicy: rt,
-		prefDC:   s.cfg.PreferredDataCenter,
-		prefRack: s.cfg.PreferredRack,
+		qm: &QueryMeta{
+			rtPolicy: rt,
+			lbPolicy: s.cfg.DefaultLBPolicy,
+			prefDC:   s.cfg.PreferredDataCenter,
+			prefRack: s.cfg.PreferredRack,
+		},
 	}
 	s.mu.RUnlock()
 	return qry
@@ -108,17 +111,18 @@ func (s *Session) Close() {
 func (s *Session) executeQuery(qry *Query) *Iter {
 	var err error
 	var itr *Iter
-	rtyNum := qry.rtPolicy.Rack + qry.rtPolicy.DataCenter
+	q := qry.qm
+	rtyNum := q.rtPolicy.Rack + q.rtPolicy.DataCenter
 	if rtyNum == 0 {
 		rtyNum = 1
 	}
-	for qry.rtPolicy.Count < rtyNum {
-		conn := s.Node.Pick(qry)
+	for q.rtPolicy.Count < rtyNum {
+		conn := s.Node.Pick(q)
 
 		if conn == nil {
 			itr = &Iter{err: ErrUnavailable}
 		} else {
-			qry.lastHostID = conn.hostID
+			q.lastHID = conn.hostID
 			itr = conn.executeQuery(qry)
 		}
 		//Check if there was even an error
@@ -136,34 +140,66 @@ func (s *Session) executeQuery(qry *Query) *Iter {
 		default:
 			return itr
 		}
-		qry.rtPolicy.Count++
+		q.rtPolicy.Count++
 	}
 	return &Iter{err: err}
 }
 
 func (s *Session) ExecuteBatch(batch *Batch) error {
-	conn := s.Node.Pick(nil)
-	if conn == nil {
-		return ErrUnavailable
+	var err error
+	b := batch.qm
+
+	rtyNum := b.rtPolicy.Rack + b.rtPolicy.DataCenter
+	if rtyNum == 0 {
+		rtyNum = 1
 	}
-	return conn.executeBatch(batch)
+	for b.rtPolicy.Count < rtyNum {
+		conn := s.Node.Pick(b)
+		if conn == nil {
+			return ErrUnavailable
+		}
+		b.lastHID = conn.hostID
+		err = conn.executeBatch(batch)
+		//Return if no error was returned
+		if err == nil {
+			return nil
+		}
+		//Check that an error frame was provided.
+		if errFrm, ok := err.(errorFrame); ok {
+			//Check the list of errors that can be retried.
+			switch errFrm.Code {
+			case errServer, errWriteTimeout, errReadTimeout, errOverloaded:
+				err = errFrm
+			default:
+				return err
+			}
+		} else {
+			return err
+		}
+		b.rtPolicy.Count++
+	}
+	return err
+}
+
+type QueryMeta struct {
+	lastHID  UUID
+	prefDC   string
+	prefRack string
+	lbPolicy LoadBalancePolicy
+	rtPolicy RetryPolicy
 }
 
 // Query represents a CQL statement that can be executed.
 type Query struct {
-	stmt       string
-	values     []interface{}
-	cons       Consistency
-	pageSize   int
-	pageState  []byte
-	prefetch   float64
-	trace      Tracer
-	session    *Session
-	lbPolicy   LoadBalancePolicy
-	rtPolicy   RetryPolicy
-	lastHostID UUID
-	prefDC     string
-	prefRack   string
+	stmt      string
+	values    []interface{}
+	cons      Consistency
+	pageSize  int
+	pageState []byte
+	prefetch  float64
+	trace     Tracer
+	session   *Session
+	qm        *QueryMeta
 }
 
 // Consistency sets the consistency level for this query. If no consistency
@@ -201,26 +237,26 @@ func (q *Query) Prefetch(p float64) *Query {
 // RetryPolicy sets the retry policy to use for this query that may differ
 // from the default cluster retry policy
 func (q *Query) RetryPolicy(rt RetryPolicy) *Query {
-	q.rtPolicy = rt
+	q.qm.rtPolicy = rt
 	return q
 }
 
 // LoadBalancePolicy sets the load balancing policy to use for this query
 // that may differ from the default cluster policy.
 func (q *Query) LoadBalancePolicy(lbp LoadBalancePolicy) *Query {
-	q.lbPolicy = lbp
+	q.qm.lbPolicy = lbp
 	return q
 }
 
 // PreferredDataCenter sets the datacenter to prefer when executing the query
 func (q *Query) PreferredDataCenter(dc string) *Query {
-	q.prefDC = dc
+	q.qm.prefDC = dc
 	return q
 }
 
 // PreferredRack sets the rack to prefer when executing the query
 func (q *Query) PreferredRack(rack string) *Query {
-	q.prefRack = rack
+	q.qm.prefRack = rack
 	return q
 }
 
@@ -350,14 +386,54 @@ type Batch struct {
 	Type    BatchType
 	Entries []BatchEntry
 	Cons    Consistency
+	qm      *QueryMeta
 }
 
+//NewBatch creates a new batch object without using the defaults from the
+//cluster configuration for load balancing and the retry policy
 func NewBatch(typ BatchType) *Batch {
-	return &Batch{Type: typ}
+	return &Batch{Type: typ,
+		qm: &QueryMeta{
+			rtPolicy: RetryPolicy{DataCenter: 0, Rack: 0},
+			lbPolicy: &RoundRobin{},
+		},
+	}
+}
+
+//NewBatch creates a new batch object using the defaults defined for the cluster.
+func (s *Session) NewBatch(typ BatchType) *Batch {
+	rt := RetryPolicy{
+		DataCenter: s.cfg.DefaultRetryPolicy.DataCenter,
+		Rack:       s.cfg.DefaultRetryPolicy.Rack,
+	}
+	return &Batch{
+		Type: typ,
+		Cons: s.cfg.Consistency,
+		qm: &QueryMeta{
+			rtPolicy: rt,
+			lbPolicy: s.cfg.DefaultLBPolicy,
+			prefDC:   s.cfg.PreferredDataCenter,
+			prefRack: s.cfg.PreferredRack,
+		},
+	}
 }
 
 func (b *Batch) Query(stmt string, args ...interface{}) {
 	b.Entries = append(b.Entries, BatchEntry{Stmt: stmt, Args: args})
+}
+
+// RetryPolicy sets the retry policy to use for this query that may differ
+// from the default cluster retry policy
+func (b *Batch) RetryPolicy(rt RetryPolicy) *Batch {
+	b.qm.rtPolicy = rt
+	return b
+}
+
+// LoadBalancePolicy sets the load balancing policy to use for this query
+// that may differ from the default cluster policy.
+func (b *Batch) LoadBalancePolicy(lbp LoadBalancePolicy) *Batch {
+	b.qm.lbPolicy = lbp
+	return b
 }
 
 type BatchType int
@@ -481,4 +557,5 @@ var (
 	ErrUnavailable = errors.New("unavailable")
 	ErrProtocol    = errors.New("protocol error")
 	ErrUnsupported = errors.New("feature not supported")
+	ErrConnTimeout = errors.New("connection timed out")
 )
