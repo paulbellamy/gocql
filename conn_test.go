@@ -20,6 +20,7 @@ type TestServer struct {
 	nreq     uint64
 	listen   net.Listener
 	nKillReq uint64
+	peers    []string
 }
 
 func TestSimple(t *testing.T) {

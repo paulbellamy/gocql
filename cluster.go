@@ -33,22 +33,24 @@ type ClusterConfig struct {
 	Compressor    Compressor    // compression algorithm (default: nil)
 	Authenticator Authenticator // authenticator (default: nil)
 	RetryPolicy   RetryPolicy   // Default retry policy to use for queries(default:0)
+	AutoDiscovery time.Duration // time between auto discovery queries(default: 0m *disabled)
 }
 
 // NewCluster generates a new config for the default cluster implementation.
 func NewCluster(hosts ...string) *ClusterConfig {
 	cfg := &ClusterConfig{
-		Hosts:        hosts,
-		CQLVersion:   "3.0.0",
-		ProtoVersion: 2,
-		Timeout:      600 * time.Millisecond,
-		DefaultPort:  9042,
-		NumConns:     2,
-		NumStreams:   128,
-		DelayMin:     1 * time.Second,
-		DelayMax:     10 * time.Minute,
-		StartupMin:   len(hosts)/2 + 1,
-		Consistency:  Quorum,
+		Hosts:         hosts,
+		CQLVersion:    "3.0.0",
+		ProtoVersion:  2,
+		Timeout:       600 * time.Millisecond,
+		DefaultPort:   9042,
+		NumConns:      2,
+		NumStreams:    128,
+		DelayMin:      1 * time.Second,
+		DelayMax:      10 * time.Minute,
+		StartupMin:    len(hosts)/2 + 1,
+		Consistency:   Quorum,
+		AutoDiscovery: 0 * time.Minute,
 	}
 	return cfg
 }
@@ -83,6 +85,10 @@ func (cfg *ClusterConfig) CreateSession() (*Session, error) {
 	impl.wgStart.Wait()
 	s := NewSession(impl)
 	s.SetConsistency(cfg.Consistency)
+	if cfg.AutoDiscovery > 0*time.Minute {
+		impl.ad = newAutoDiscovery(impl)
+		go impl.ad.query()
+	}
 	return s, nil
 }
 
@@ -93,6 +99,7 @@ type clusterImpl struct {
 	conns    map[*Conn]struct{}
 	keyspace string
 	mu       sync.Mutex
+	ad       *autoDiscovery
 
 	started bool
 	wgStart sync.WaitGroup
@@ -170,6 +177,14 @@ func (c *clusterImpl) addConn(conn *Conn, keyspace string) {
 	c.conns[conn] = struct{}{}
 }
 
+// hasAddress returns whether connection address is already apart of the connection pool.
+func (c *clusterImpl) hasAddress(addr string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, exists := c.connPool[addr]
+	return exists
+}
+
 func (c *clusterImpl) removeConn(conn *Conn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -233,6 +248,58 @@ func (c *clusterImpl) Close() {
 			conn.Close()
 		}
 	})
+}
+
+// autoDiscovery is a service to query random nodes in the cluster to discover
+// new nodes to form connections with
+type autoDiscovery struct {
+	QueryInterval time.Duration // interval to query the cluster for new hosts
+	c             *clusterImpl  // reference to the cluster implementation
+	cfg           ClusterConfig // reference to the cluster configuration
+}
+
+// newAutoDisocvery creates a new autoDiscovery instance that queries the cluster
+func newAutoDiscovery(c *clusterImpl) *autoDiscovery {
+	return &autoDiscovery{
+		QueryInterval: c.cfg.AutoDiscovery,
+		c:             c,
+		cfg:           c.cfg,
+	}
+}
+
+// query picks a node to pull the topology information from. Nodes that are not
+// appart of the connection pool will be added.
+func (a *autoDiscovery) query() {
+	qry := &Query{stmt: "SELECT peer,rpc_address FROM system.peers", values: nil, cons: One}
+	conn := a.c.Pick(qry)
+	if conn != nil {
+		itr := conn.executeQuery(qry)
+		if itr.err != nil {
+			log.Printf("autodiscovery failed: %v", itr.err)
+			return
+		}
+		var peerAddr, rpcAddr string
+		//Iterate through the results of the hosts
+		for itr.Scan(&peerAddr, &rpcAddr) {
+			addr := peerAddr
+			//use the RPC address if it is defined
+			if rpcAddr != "" || rpcAddr != "0.0.0.0" {
+				addr = rpcAddr
+			}
+			//Add the port number to the address and check if it exists in the pool.
+			//May be an issue if the port number isn't the default.
+			addr = fmt.Sprintf("%s:%d", addr, a.cfg.DefaultPort)
+			if !a.c.hasAddress(addr) {
+				//Create all the connections
+				for i := 0; i < a.cfg.NumConns; i++ {
+					a.c.connect(addr)
+				}
+			}
+		}
+	}
+	//Delay the next execution of the autoDiscovery.query
+	<-time.After(a.QueryInterval)
+	go a.query()
 }
 
 var (
